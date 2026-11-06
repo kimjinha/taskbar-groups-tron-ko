@@ -490,7 +490,78 @@ Public Class TronLine
         End Try
     End Sub
 
+    '---------- pause the Lively video wallpaper (mpv) while any normal app window is open ----------
+    'Lively's own pause rules never fired on this PC, so we drive mpv directly through its IPC pipe.
+    Private Shared lastPause As Integer = -1   '-1 unknown, 0 playing, 1 paused
+    Private Shared lastPipe As String = Nothing
+
+    <DllImport("user32.dll")> Private Shared Function EnumWindows(cb As EnumProc, l As IntPtr) As Boolean
+    End Function
+    Private Delegate Function EnumProc(h As IntPtr, l As IntPtr) As Boolean
+    <DllImport("user32.dll")> Private Shared Function IsIconic(h As IntPtr) As Boolean
+    End Function
+    <DllImport("user32.dll")> Private Shared Function GetWindowTextLength(h As IntPtr) As Integer
+    End Function
+    <DllImport("user32.dll", EntryPoint:="GetWindowLongW")> Private Shared Function GetWindowLong(h As IntPtr, i As Integer) As Integer
+    End Function
+    <DllImport("user32.dll")> Private Shared Function GetWindowThreadProcessId(h As IntPtr, ByRef pid As Integer) As Integer
+    End Function
+    <DllImport("dwmapi.dll")> Private Shared Function DwmGetWindowAttribute(h As IntPtr, attr As Integer, ByRef v As Integer, size As Integer) As Integer
+    End Function
+
+    Private Shared ReadOnly IgnoreClasses As String() = {"Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd", "NotifyIconOverflowWindow"}
+    Private Shared ReadOnly IgnoreProcs As String() = {"mpv", "Lively", "Lively.UI.WinUI", "Lively.Watchdog", "TaskbarX", "TextInputHost", "ShellExperienceHost", "SearchApp", "StartMenuExperienceHost"}
+
+    Private Shared Function AnyAppWindowOpen() As Boolean
+        Dim found = False
+        Dim me_ = Process.GetCurrentProcess().Id
+        EnumWindows(Function(h, l)
+                        If found Then Return False
+                        If Not IsWindowVisible(h) OrElse IsIconic(h) OrElse GetWindowTextLength(h) = 0 Then Return True
+                        If (GetWindowLong(h, -20) And &H80) <> 0 Then Return True              'WS_EX_TOOLWINDOW (tray popups, overlays)
+                        Dim cloaked As Integer = 0
+                        DwmGetWindowAttribute(h, 14, cloaked, 4)                              'DWMWA_CLOAKED: hidden UWP / other desktops
+                        If cloaked <> 0 Then Return True
+                        Dim cls As New StringBuilder(256)
+                        Win32.GetClassName(h, cls, 256)
+                        If IgnoreClasses.Contains(cls.ToString()) Then Return True
+                        Dim wr As Win32.RECT
+                        Win32.GetWindowRect(h, wr)
+                        If wr.Right - wr.Left < 200 OrElse wr.Bottom - wr.Top < 120 Then Return True
+                        Dim pid As Integer
+                        GetWindowThreadProcessId(h, pid)
+                        If pid = me_ Then Return True
+                        Try
+                            If IgnoreProcs.Contains(Process.GetProcessById(pid).ProcessName) Then Return True
+                        Catch
+                            Return True
+                        End Try
+                        found = True
+                        Return False
+                    End Function, IntPtr.Zero)
+        Return found
+    End Function
+
+    Private Shared Sub UpdateWallpaperPause()
+        Try
+            Dim want = If(AnyAppWindowOpen(), 1, 0)
+            Dim pipe = IO.Directory.GetFiles("\\.\pipe\").Select(Function(p) IO.Path.GetFileName(p)).FirstOrDefault(Function(n) n.StartsWith("mpvsocket"))
+            If pipe Is Nothing Then Return   'no video wallpaper running
+            If want = lastPause AndAlso pipe = lastPipe Then Return   'resend when mpv was restarted (new pipe)
+            lastPipe = pipe
+            Using c As New IO.Pipes.NamedPipeClientStream(".", pipe, IO.Pipes.PipeDirection.Out)
+                c.Connect(200)
+                Dim b = Encoding.UTF8.GetBytes("{""command"":[""set_property"",""pause""," & If(want = 1, "true", "false") & "]}" & vbLf)
+                c.Write(b, 0, b.Length)
+            End Using
+            lastPause = want
+        Catch
+            lastPause = -1   'retry next tick (mpv restarting, pipe busy)
+        End Try
+    End Sub
+
     Private Shared Sub Tick(sender As Object, e As EventArgs)
+        UpdateWallpaperPause()
         Try
             Dim bars As New List(Of IntPtr)
             Dim primary = Win32.FindWindow("Shell_TrayWnd", Nothing)
@@ -602,7 +673,7 @@ Public Class TronLine
         Public Lane As Integer       'offset of the line from the window's top (horizontal) / left (vertical)
         Public GlowPx As Integer     'bloom width in pixels
 
-        Private ReadOnly anim As New System.Windows.Forms.Timer With {.Interval = 15} '~60 fps
+        Private ReadOnly anim As New System.Windows.Forms.Timer With {.Interval = 33} '~30 fps: smooth enough, half the CPU of 60
         Private ReadOnly clock As Diagnostics.Stopwatch = Diagnostics.Stopwatch.StartNew()
         Private buf As Bitmap
 

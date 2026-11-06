@@ -112,7 +112,7 @@ namespace client
                     i++;
                 }
 
-                if (taskbar.Contains(mouseClick)) // Click on taskbar
+                if (true) // always open against the taskbar edge (a group opened from another popup used to land mid-screen)
                 {
                     if (taskbar.Top == screen.Top && taskbar.Width == screen.Width)
                     {
@@ -286,7 +286,7 @@ namespace client
             //System.Diagnostics.Debugger.Launch();
 
             this.Width = 0;
-            int tileW = Tron.S(56), tileH = Tron.S(48);
+            int tileW = ucShortcut.TileW, tileH = ucShortcut.TileH;
             this.Height = tileH;
             int pad = Tron.IsTron(ThisCategory) ? Tron.S(4) : 0; // room for the neon frame around the tiles
             int x = pad;
