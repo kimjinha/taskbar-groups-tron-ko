@@ -1,0 +1,951 @@
+﻿﻿﻿﻿﻿﻿using ChinhDo.Transactions;
+using client.Classes;
+using client.User_controls;
+using IWshRuntimeLibrary;
+using System;
+using System.Collections.Generic;
+using System.Drawing;
+using System.IO;
+using System.Linq;
+using System.Text.RegularExpressions;
+using System.Transactions;
+using System.Windows.Forms;
+using Microsoft.WindowsAPICodePack.Shell;
+using Microsoft.WindowsAPICodePack.Dialogs; 
+
+namespace client.Forms
+{
+    public partial class frmGroup : Form
+    {
+        public Category Category;
+        public frmClient Client;
+        public bool IsNew;
+        private String[] imageExt = new String[] { ".png", ".jpg", ".jpe", ".jfif", ".jpeg", };
+        private String[] extensionExt = new String[] { ".exe", ".lnk", ".url" };
+        private String[] specialImageExt = new String[] { ".ico", ".exe", ".lnk" };
+        private String[] newExt;
+
+        public ucProgramShortcut selectedShortcut;
+
+        public static Shell32.Shell shell = new Shell32.Shell();
+
+        private List<ProgramShortcut> shortcutChanged = new List<ProgramShortcut>();
+
+
+        //--------------------------------------
+        // CTOR AND LOAD
+        //--------------------------------------
+
+        // CTOR for creating a new group
+        public frmGroup(frmClient client)
+        {
+            // Setting from profile
+            System.Runtime.ProfileOptimization.StartProfile("frmGroup.Profile");
+
+            InitializeComponent();
+
+            // Setting default category properties
+            newExt = imageExt.Concat(specialImageExt).ToArray();
+            Category = new Category { ShortcutList = new List<ProgramShortcut>() };
+            Client = client;
+            IsNew = true;
+
+            // Setting default control values
+            UpdateLayout();
+            radioTron.Checked = true;
+            Category.isTronTheme = true;
+            Category.ColorString = "#0A0F14";
+            Category.Opacity = 10;
+            pnlCustomColor.Visible = true;
+            pnlCustomColor.BackColor = Color.FromArgb(0, 229, 255);
+        }
+
+        // CTOR for editing an existing group
+        public frmGroup(frmClient client, Category category)
+        {
+            // Setting form profile
+            System.Runtime.ProfileOptimization.StartProfile("frmGroup.Profile");
+
+            InitializeComponent();
+
+            // Setting properties
+            Category = category;
+            Client = client;
+            IsNew = false;
+
+            // Setting control values from loaded group
+            this.Text = "그룹 편집";
+            txtGroupName.Text = Regex.Replace(Category.Name, @"(_)+", " ");
+            pnlAllowOpenAll.Checked = category.allowOpenAll;
+            cmdAddGroupIcon.BackgroundImage = Category.LoadIconImage();
+            lblNum.Text = Category.Width.ToString();
+            lblOpacity.Text = Category.Opacity.ToString();
+           
+            if (Category.ColorString == null)  // Handles if groups is created from earlier releas w/o ColorString property
+                Category.ColorString = System.Drawing.ColorTranslator.ToHtml(Color.FromArgb(31, 31, 31));
+
+            Color categoryColor = ImageFunctions.FromString(Category.ColorString);
+            
+            if (Category.isTronTheme || (Category.ColorString != null && Category.ColorString.Equals("#0A0F14", StringComparison.OrdinalIgnoreCase)))
+            {
+                radioTron.Checked = true;
+                pnlCustomColor.Visible = true;
+                pnlCustomColor.BackColor = Color.FromArgb(0, 229, 255);
+            }
+            else if (categoryColor == Color.FromArgb(31, 31, 31))
+            {
+                radioDark.Checked = true;
+                pnlCustomColor.Visible = false;
+            }
+            else if (categoryColor == Color.FromArgb(230, 230, 230))
+            {
+                radioLight.Checked = true;
+                pnlCustomColor.Visible = false;
+            }
+            else
+            {
+                radioCustom.Checked = true;
+                pnlCustomColor.Visible = true;
+                pnlCustomColor.BackColor = categoryColor;
+            }
+
+            // Loading existing shortcutpanels
+            int position = 0;
+            foreach (ProgramShortcut psc in category.ShortcutList)
+            {
+                LoadShortcut(psc, position);
+                position++;
+            }
+        }
+
+        // Handle scaling etc(?) (WORK IN PROGRESS)
+        private void frmGroup_Load(object sender, EventArgs e)
+        {
+            this.MinimumSize = new Size(Tron.S(580), 0);
+            this.KeyPreview = true;
+            this.KeyDown += new KeyEventHandler(frmGroup_KeyDown);
+            UpdateLayout();
+        }
+
+        private void frmGroup_KeyDown(object sender, KeyEventArgs e)
+        {
+            if (e.Control && e.KeyCode == Keys.S)
+            {
+                cmdSave_Click(sender, e);
+                e.Handled = true;
+            }
+            else if (e.KeyCode == Keys.Escape)
+            {
+                cmdExit_Click(sender, e);
+                e.Handled = true;
+            }
+        }
+
+        // Everything sits in tlpRoot (AutoSize rows), so only the list height and the form height are set here.
+        public void UpdateLayout()
+        {
+            int count = pnlShortcuts.Controls.Count;
+            int rowHeight = count > 0 ? pnlShortcuts.Controls[0].Height : 0;
+            pnlShortcuts.Height = Math.Min(count, 5) * rowHeight; // more than 5 -> scroll
+
+            cmdDelete.Visible = !IsNew;
+
+            tlpRoot.PerformLayout();
+            this.ClientSize = new Size(this.ClientSize.Width, tlpRoot.Height);
+        }
+
+        //--------------------------------------
+        // SHORTCUT PANEL HANLDERS
+        //--------------------------------------
+
+        // Load up shortcut panel
+        public void LoadShortcut(ProgramShortcut psc, int position)
+        {
+            pnlShortcuts.AutoScroll = false;
+            ucProgramShortcut ucPsc = new ucProgramShortcut()
+            {
+                MotherForm = this,
+                Shortcut = psc,
+                Position = position,
+            };
+            ucPsc.Dock = DockStyle.Top;
+            pnlShortcuts.Controls.Add(ucPsc);
+            ucPsc.Show();
+            ucPsc.BringToFront(); // docked Top in reverse z-order -> newest row goes last
+
+            pnlShortcuts.AutoScroll = true;
+            UpdateLayout();
+
+        }
+
+        // Adding shortcut by button
+        private void pnlAddShortcut_Click(object sender, EventArgs e)
+        {
+            resetSelection();
+
+            lblErrorShortcut.Visible = false; // resetting error msg
+
+            if (Category.ShortcutList.Count >= 20)
+            {
+                lblErrorShortcut.Text = "한 그룹당 최대 20개까지 추가 가능합니다";
+                lblErrorShortcut.BringToFront();
+                lblErrorShortcut.Visible = true;
+            }
+
+
+            OpenFileDialog openFileDialog = new OpenFileDialog // ask user to select exe file
+            {
+                InitialDirectory = @"C:\ProgramData\Microsoft\Windows\Start Menu\Programs",
+                Title = "새 바로 가기 프로그램 선택",
+                CheckFileExists = true,
+                CheckPathExists = true,
+                Multiselect = true,
+                DefaultExt = "exe",
+                Filter = "실행 파일 및 바로 가기 (*.exe, *.lnk, *.url)|*.exe;*.lnk;*.url|모든 파일 (*.*)|*.*",
+                RestoreDirectory = true,
+                ReadOnlyChecked = true,
+                DereferenceLinks = false
+             };
+
+            if (openFileDialog.ShowDialog() == DialogResult.OK)
+            {
+                foreach (String file in openFileDialog.FileNames)
+                {
+                    addShortcut(file);
+                }
+                resetSelection();
+            }
+
+            if (pnlShortcuts.Controls.Count != 0)
+            {
+                pnlShortcuts.ScrollControlIntoView(pnlShortcuts.Controls[0]);
+            }
+        }
+
+        // Adding folder shortcuts (drag-and-drop already accepted folders; the file dialog could not pick them)
+        private void cmdAddFolder_Click(object sender, EventArgs e)
+        {
+            resetSelection();
+            lblErrorShortcut.Visible = false;
+
+            CommonOpenFileDialog folderDialog = new CommonOpenFileDialog
+            {
+                Title = "바로 가기로 넣을 폴더 선택",
+                IsFolderPicker = true,
+                Multiselect = true,
+                EnsurePathExists = true
+            };
+            if (folderDialog.ShowDialog() == CommonFileDialogResult.Ok)
+            {
+                this.Focus();
+                foreach (String folder in folderDialog.FileNames)
+                {
+                    addShortcut(folder);
+                }
+                resetSelection();
+            }
+        }
+
+        // Handle dropped programs into the add program/shortcut field
+        private void pnlDragDropExt(object sender, DragEventArgs e)
+        {
+            var files = (String[])e.Data.GetData(DataFormats.FileDrop);
+
+            if (files == null)
+            {
+                ShellObjectCollection ShellObj = ShellObjectCollection.FromDataObject((System.Runtime.InteropServices.ComTypes.IDataObject)e.Data);
+
+                foreach (ShellNonFileSystemItem item in ShellObj)
+                {
+                    addShortcut(item.ParsingName, true);
+                }
+            } else
+            {
+                // Loops through each file to make sure they exist and to add them directly to the shortcut list
+                foreach (var file in files)
+                {
+                    if (extensionExt.Contains(Path.GetExtension(file)) && System.IO.File.Exists(file) || Directory.Exists(file))
+                    {
+                        addShortcut(file);
+                    }
+                }
+            }
+
+            if (pnlShortcuts.Controls.Count != 0)
+            {
+                pnlShortcuts.ScrollControlIntoView(pnlShortcuts.Controls[0]);
+            }
+            
+            resetSelection();
+        }
+
+        // Handle adding the shortcut to list
+        private void addShortcut(String file, bool isExtension = false)
+        {
+            String workingDirec = getProperDirectory(file);
+
+            ProgramShortcut psc = new ProgramShortcut() { FilePath = Environment.ExpandEnvironmentVariables(file), isWindowsApp = isExtension, WorkingDirectory = workingDirec }; //Create new shortcut obj
+            Category.ShortcutList.Add(psc); // Add to panel shortcut list
+            LoadShortcut(psc, Category.ShortcutList.Count - 1);
+        }
+
+        // Delete shortcut
+        public void DeleteShortcut(ProgramShortcut psc)
+        {
+            resetSelection();
+
+            Category.ShortcutList.Remove(psc);
+            resetSelection();
+            bool before = true;
+            //int i = 0;
+
+            foreach (ucProgramShortcut ucPsc in pnlShortcuts.Controls)
+            {
+                if (before)
+                {
+                    ucPsc.Position -= 1;
+                }
+                if (ucPsc.Shortcut == psc)
+                {
+                    //i = pnlShortcuts.Controls.IndexOf(ucPsc);
+
+                    int controlIndex = pnlShortcuts.Controls.IndexOf(ucPsc);
+
+                    pnlShortcuts.Controls.Remove(ucPsc);
+
+                    if (controlIndex + 1 != pnlShortcuts.Controls.Count)
+                    {
+                        try
+                        {
+                            pnlShortcuts.ScrollControlIntoView(pnlShortcuts.Controls[controlIndex]);
+                        } catch
+                        {
+                            if (pnlShortcuts.Controls.Count != 0)
+                            {
+                                pnlShortcuts.ScrollControlIntoView(pnlShortcuts.Controls[controlIndex - 1]);
+                            }
+                        }
+                    }
+
+                    before = false;
+                }
+            }
+
+UpdateLayout();
+        }
+
+        // Change positions of shortcut panels
+        public void Swap<T>(IList<T> list, int indexA, int indexB)
+        {
+            resetSelection();
+            T tmp = list[indexA];
+            list[indexA] = list[indexB];
+            list[indexB] = tmp;
+
+            // Clears and reloads all shortcuts with new positions
+            pnlShortcuts.Controls.Clear();
+            UpdateLayout();
+
+            selectedShortcut = null;
+
+            int position = 0;
+            foreach (ProgramShortcut psc in Category.ShortcutList)
+            {
+                LoadShortcut(psc, position);
+                position++;
+            }
+        }
+
+
+
+        //--------------------------------------
+        // IMAGE HANDLERS
+        //--------------------------------------
+
+        // Adding icon by button
+        private void cmdAddGroupIcon_Click(object sender, EventArgs e)
+        {
+            resetSelection();
+
+            lblErrorIcon.Visible = false;  //resetting error msg
+
+            OpenFileDialog openFileDialog = new OpenFileDialog  // ask user to select img as group icon
+            {
+                InitialDirectory = Environment.GetFolderPath(Environment.SpecialFolder.MyPictures),
+                Title = "그룹 아이콘 선택",
+                CheckFileExists = true,
+                CheckPathExists = true,
+                DefaultExt = "img",
+                Filter = "이미지 및 실행 파일 (*.png, *.jpg, *.jpeg, *.ico, *.exe)|*.png;*.jpg;*.jpeg;*.jpe;*.jfif;*.ico;*.exe|모든 파일 (*.*)|*.*",
+                FilterIndex = 2,
+                RestoreDirectory = true,
+                ReadOnlyChecked = true,
+                DereferenceLinks = false,
+        };
+
+            if (openFileDialog.ShowDialog() == DialogResult.OK)
+            {
+
+                String imageExtension = Path.GetExtension(openFileDialog.FileName).ToLower();
+
+                handleIcon(openFileDialog.FileName, imageExtension);
+            }
+        }
+
+        // Handle drag and dropped images
+        private void pnlDragDropImg(object sender, DragEventArgs e)
+        {
+            resetSelection();
+
+            var files = (String[])e.Data.GetData(DataFormats.FileDrop);
+
+            String imageExtension = Path.GetExtension(files[0]).ToLower();
+
+            if (files.Length == 1 && newExt.Contains(imageExtension) && System.IO.File.Exists(files[0]))
+            {
+                // Checks if the files being added/dropped are an .exe or .lnk in which tye icons need to be extracted/processed
+                handleIcon(files[0], imageExtension);
+            }
+        }
+
+        private void handleIcon(String file, String imageExtension)
+        {
+            // Checks if the files being added/dropped are an .exe or .lnk in which tye icons need to be extracted/processed
+            if (specialImageExt.Contains(imageExtension))
+            {
+                if (imageExtension == ".lnk")
+                {
+                    cmdAddGroupIcon.BackgroundImage = handleLnkExt(file);
+                }
+                else
+                {
+                    cmdAddGroupIcon.BackgroundImage = Icon.ExtractAssociatedIcon(file).ToBitmap();
+                }
+            }
+            else
+            {
+                cmdAddGroupIcon.BackgroundImage = Image.FromFile(file);
+            }
+            lblAddGroupIcon.Text = "그룹 아이콘 변경";
+        }
+
+        // Handle returning images of icon files (.lnk)
+        public static Bitmap handleLnkExt(String file)
+        {
+            // A shortcut whose program was uninstalled used to throw here and pop up a bare path; show the error icon instead
+            try { return handleLnkExtCore(file); }
+            catch (Exception) { return global::client.Properties.Resources.Error; }
+        }
+
+        private static Bitmap handleLnkExtCore(String file)
+        {
+            IWshShortcut lnkIcon = (IWshShortcut)new WshShell().CreateShortcut(file);
+            String[] icLocation = lnkIcon.IconLocation.Split(',');
+            // Check if iconLocation exists to get an .ico from; if not then take the image from the .exe it is referring to
+            // Checks for link iconLocations as those are used by some applications
+            if (icLocation[0] != "" && !lnkIcon.IconLocation.Contains("http"))
+            {
+                return Icon.ExtractAssociatedIcon(Path.GetFullPath(Environment.ExpandEnvironmentVariables(icLocation[0]))).ToBitmap();
+            }
+            else if (icLocation[0] == "" && lnkIcon.TargetPath == "")
+            {
+                return handleWindowsApp.getWindowsAppIcon(file);
+            } else
+            {
+                return Icon.ExtractAssociatedIcon(Path.GetFullPath(Environment.ExpandEnvironmentVariables(lnkIcon.TargetPath))).ToBitmap();
+            }
+
+        }
+
+
+        public static String handleExtName(String file)
+        {
+            string fileName = Path.GetFileName(file);
+            file = Path.GetDirectoryName(Path.GetFullPath(file));
+            Shell32.Folder shellFolder = shell.NameSpace(file);
+            Shell32.FolderItem shellItem = shellFolder.Items().Item(fileName);
+
+            return shellItem.Name;
+        }
+
+        // Below two functions highlights the background as you would if you hovered over it with a mosue
+        // Use checkExtension to allow file dropping after a series of checks
+        // Only highlights if the files being dropped are valid in extension wise
+        private void pnlDragDropEnterExt(object sender, DragEventArgs e)
+        {
+            resetSelection();
+
+            if (checkExtensions(e, extensionExt))
+            {
+                pnlAddShortcut.BackColor = Tron.Hover;
+            }
+        }
+
+        private void pnlDragDropEnterImg(object sender, DragEventArgs e)
+        {
+            resetSelection();
+
+            if (checkExtensions(e, imageExt.Concat(specialImageExt).ToArray()))
+            {
+                pnlGroupIcon.BackColor = Tron.Hover;
+            }
+        }
+
+        // Series of checks to make sure it can be dropped
+        private Boolean checkExtensions(DragEventArgs e, String[] exts)
+        {
+
+            // Make sure the file can be dragged dropped
+            if (!e.Data.GetDataPresent(DataFormats.FileDrop)) return false;
+
+            if (e.Data.GetDataPresent("Shell IDList Array"))
+            {
+                 e.Effect = e.AllowedEffect;
+                 return true;
+            }
+
+
+            // Get the list of files of the files dropped
+            String[] files = (String[])e.Data.GetData(DataFormats.FileDrop);
+
+            // Loop through each file and make sure the extension is allowed as defined by a series of arrays at the top of the script
+            foreach (var file in files)
+            {
+                String ext = Path.GetExtension(file);
+
+                if (exts.Contains(ext.ToLower()) || Directory.Exists(file))
+                {
+                    // Gives the effect that it can be dropped and unlocks the ability to drop files in
+                    e.Effect = DragDropEffects.Copy;
+                    return true;
+                }
+                else
+                {
+                    return false;
+                }
+            }
+            return false;
+        }
+
+        //--------------------------------------
+        // SAVE/EXIT/DELETE GROUP
+        //--------------------------------------
+
+        // Exit editor
+        private void cmdExit_Click(object sender, EventArgs e)
+        {
+            this.Hide();
+            this.Dispose();
+            Client.Reload(); //flush and reload category panels
+        }
+
+        // Save group
+        private void cmdSave_Click(object sender, EventArgs e)
+        {
+            resetSelection();
+
+            //List <Directory> directories = 
+
+            if (txtGroupName.Text == "Name the new group..." || txtGroupName.Text == "새 그룹 이름 입력..." || string.IsNullOrWhiteSpace(txtGroupName.Text)) // Verify category name
+            {
+                lblErrorTitle.Text = "그룹 이름을 입력해야 합니다";
+                lblErrorTitle.Visible = true;
+            }
+            else if (IsNew && Directory.Exists(@MainPath.path + @"\config\" + txtGroupName.Text) ||
+                     !IsNew && Category.Name != txtGroupName.Text && Directory.Exists(@MainPath.path + @"\config\" + txtGroupName.Text))
+            {
+                lblErrorTitle.Text = "동일한 이름의 그룹이 이미 존재합니다";
+                lblErrorTitle.Visible = true;
+            }
+            else if (txtGroupName.Text.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || txtGroupName.Text.Contains("\\") || txtGroupName.Text.Contains("/"))
+            {
+                lblErrorTitle.Text = "이름에 특수문자(\\ / : * ? \" < > |)를 포함할 수 없습니다";
+                lblErrorTitle.Visible = true;
+            }
+            else if (cmdAddGroupIcon.BackgroundImage ==
+                global::client.Properties.Resources.AddWhite) // Verify icon
+            {
+                lblErrorIcon.Text = "그룹 아이콘을 선택해야 합니다";
+                lblErrorIcon.Visible = true;
+            }
+            else if (Category.ShortcutList.Count == 0) // Verify shortcuts
+            {
+                lblErrorShortcut.Text = "최소 1개 이상의 바로 가기를 추가해야 합니다";
+                lblErrorShortcut.Visible = true;
+            }
+            else
+            {
+                try
+                {
+
+                    foreach(ProgramShortcut shortcutModifiedItem in shortcutChanged)
+                    {
+                        if (!Directory.Exists(shortcutModifiedItem.WorkingDirectory))
+                        {
+                            shortcutModifiedItem.WorkingDirectory = getProperDirectory(shortcutModifiedItem.FilePath);
+                        }
+                    }
+
+
+                    if (!IsNew)
+                    {
+                        //
+                        // Delete old config
+                        //
+                        string configPath = @MainPath.path + @"\config\" + Category.Name;
+                        string shortcutPath = @MainPath.path + @"\Shortcuts\" + Regex.Replace(Category.Name, @"(_)+", " ") + ".lnk";
+
+                        try
+                        {
+                            IFileManager fm = new TxFileManager();
+                            using (TransactionScope scope1 = new TransactionScope())
+                            {
+                                fm.DeleteDirectory(configPath);
+                                fm.Delete(shortcutPath);
+                                scope1.Complete();
+                            }
+                        } catch (Exception)
+                        {
+                            MessageBox.Show("그룹을 저장하려면 사용 중인 프로그램을 먼저 닫아주세요.", "알림", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                            return;
+                        }
+                    }
+                    //
+                    // Creating new config
+                    //
+                    //int width = int.Parse(lblNum.Text);
+
+                    Category.Width = int.Parse(lblNum.Text);
+
+                    //Category category = new Category(txtGroupName.Text, Category.ShortcutList, width, System.Drawing.ColorTranslator.ToHtml(CategoryColor), Category.Opacity); // Instantiate category
+
+                    // Normalize string so it can be used in path; remove spaces
+                    Category.Name = Regex.Replace(txtGroupName.Text, @"\s+", "_");
+
+                    Category.CreateConfig(cmdAddGroupIcon.BackgroundImage); // Creating group config files
+                    Client.LoadCategory(Path.GetFullPath(@"config\" + Category.Name)); // Loading visuals
+                    
+                    this.Dispose();
+                    Client.Reload();
+
+                    if (MessageBox.Show("그룹을 저장했습니다.\n\n작업 표시줄에 고정할 수 있도록 Shortcuts 폴더를 열까요?\n(열린 폴더에서 바로 가기를 우클릭 → '작업 표시줄에 고정')",
+                            "저장 완료", MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.Yes)
+                    {
+                        System.Diagnostics.Process.Start("explorer.exe", "\"" + Path.Combine(MainPath.path, "Shortcuts") + "\"");
+                    }
+                }
+                catch (IOException ex)
+                {
+                    MessageBox.Show(ex.Message);
+                }
+
+                Client.Reset();
+            }
+
+        }
+
+        // Delete group
+        private void cmdDelete_Click(object sender, EventArgs e)
+        {
+            resetSelection();
+
+            try
+            {
+                string configPath = @MainPath.path + @"\config\" + Category.Name;
+                string shortcutPath = @MainPath.path + @"\Shortcuts\" + Regex.Replace(Category.Name, @"(_)+", " ") + ".lnk";
+
+                var dir = new DirectoryInfo(configPath);
+
+                try
+                {
+                    IFileManager fm = new TxFileManager();
+                    using (TransactionScope scope1 = new TransactionScope())
+                    {
+                        fm.DeleteDirectory(configPath);
+                        fm.Delete(shortcutPath);
+                        this.Hide();
+                        this.Dispose();
+                        Client.Reload(); //flush and reload category panels
+                        scope1.Complete();
+                    }
+                }
+                catch (Exception)
+                {
+                    MessageBox.Show("그룹을 삭제하려면 사용 중인 프로그램을 먼저 닫아주세요.", "알림", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+
+            }
+            catch (IOException ex)
+            {
+                MessageBox.Show(ex.Message);
+            }
+            Client.Reset();
+
+        }
+
+        //--------------------------------------
+        // UI CUSTOMIZATION
+        //--------------------------------------
+
+        // Change category width
+        private void cmdWidthUp_Click(object sender, EventArgs e)
+        {
+            resetSelection();
+
+            int num = int.Parse(lblNum.Text);
+            if (num > 19)
+            {
+                lblErrorNum.Text = "최대 너비입니다";
+                lblErrorNum.Visible = true;
+            }
+            else
+            {
+                num++;
+                lblErrorNum.Visible = false;
+                lblNum.Text = num.ToString();
+            }
+        }
+        private void cmdWidthDown_Click(object sender, EventArgs e)
+        {
+            resetSelection();
+
+            int num = int.Parse(lblNum.Text);
+            if (num == 1)
+            {
+                lblErrorNum.Text = "너비는 1 이상이어야 합니다";
+                lblErrorNum.Visible = true;
+            }
+            else
+            {
+                num--;
+                lblErrorNum.Visible = false;
+                lblNum.Text = num.ToString();
+            }
+        }
+
+        // Color radio buttons
+        private void radioTron_Click(object sender, EventArgs e)
+        {
+            Category.isTronTheme = true;
+            Category.ColorString = "#0A0F14";
+            Category.Opacity = 10;
+            lblOpacity.Text = "10";
+            pnlCustomColor.Visible = true;
+            pnlCustomColor.BackColor = Color.FromArgb(0, 229, 255);
+        }
+
+        private void radioCustom_Click(object sender, EventArgs e)
+        {
+            Category.isTronTheme = false;
+            if (colorDialog.ShowDialog() == DialogResult.OK)
+            {
+                Category.ColorString = System.Drawing.ColorTranslator.ToHtml(colorDialog.Color);
+                pnlCustomColor.Visible = true;
+                pnlCustomColor.BackColor = colorDialog.Color;
+            }
+        }
+
+        private void radioDark_Click(object sender, EventArgs e)
+        {
+            Category.isTronTheme = false;
+            Category.ColorString = System.Drawing.ColorTranslator.ToHtml(Color.FromArgb(31, 31, 31));
+            pnlCustomColor.Visible = false;
+        }
+
+        private void radioLight_Click(object sender, EventArgs e)
+        {
+            Category.isTronTheme = false;
+            Category.ColorString = System.Drawing.ColorTranslator.ToHtml(Color.FromArgb(230, 230, 230));
+            pnlCustomColor.Visible = false;
+        }
+
+        // Opacity buttons
+        private void numOpacUp_Click(object sender, EventArgs e)
+        {
+            double op = double.Parse(lblOpacity.Text);
+            op += 10;
+            Category.Opacity = op;
+            lblOpacity.Text = op.ToString();
+            numOpacDown.Enabled = true;
+
+            if (op > 90)
+            {
+                numOpacUp.Enabled = false;
+            }
+        }
+
+        private void numOpacDown_Click(object sender, EventArgs e)
+        {
+            double op = double.Parse(lblOpacity.Text);
+            op -= 10;
+            Category.Opacity = op;
+            lblOpacity.Text = op.ToString();
+            numOpacUp.Enabled = true;
+
+            if (op < 10)
+            {
+                numOpacDown.Enabled = false;
+            }
+        }
+
+        //--------------------------------------
+        // FORM VISUAL INTERACTIONS
+        //--------------------------------------
+
+        private void pnlGroupIcon_MouseEnter(object sender, EventArgs e)
+        {
+            pnlGroupIcon.BackColor = Tron.Hover;
+        }
+
+        private void pnlGroupIcon_MouseLeave(object sender, EventArgs e)
+        {
+            pnlGroupIcon.BackColor = Tron.Panel;
+        }
+
+        private void pnlAddShortcut_MouseEnter(object sender, EventArgs e)
+        {
+            pnlAddShortcut.BackColor = Tron.Hover;
+        }
+
+        private void pnlAddShortcut_MouseLeave(object sender, EventArgs e)
+        {
+            pnlAddShortcut.BackColor = Tron.Bg;
+        }
+
+        // Handles placeholder text for group name
+        private void txtGroupName_MouseClick(object sender, MouseEventArgs e)
+        {
+            resetSelection();
+            if (txtGroupName.Text == "Name the new group..." || txtGroupName.Text == "새 그룹 이름 입력...")
+                txtGroupName.Text = "";
+        }
+
+        private void txtGroupName_Leave(object sender, EventArgs e)
+        {
+            if (string.IsNullOrWhiteSpace(txtGroupName.Text))
+                txtGroupName.Text = "새 그룹 이름 입력...";
+        }
+
+        // Error labels
+        private void txtGroupName_TextChanged(object sender, EventArgs e)
+        {
+            lblErrorTitle.Visible = false;
+        }
+
+        //--------------------------------------
+        // SHORTCUT/PRGORAM SELECTION
+        //--------------------------------------
+
+        // Deselect selected program/shortcut
+        public void resetSelection()
+        {
+            pnlArgumentTextbox.Enabled = false;
+            cmdSelectDirectory.Enabled = false;
+            if (selectedShortcut != null)
+            {
+                pnlColor.Visible = true;
+                pnlArguments.Visible = false;
+                selectedShortcut.ucDeselected();
+                selectedShortcut.IsSelected = false;
+                selectedShortcut = null;
+                UpdateLayout();
+            }
+
+        }
+
+        // Enable the argument textbox once a shortcut/program has been selected
+        public void enableSelection(ucProgramShortcut passedShortcut)
+        {
+            selectedShortcut = passedShortcut;
+            passedShortcut.ucSelected();
+            passedShortcut.IsSelected = true;
+
+            pnlArgumentTextbox.Text = Category.ShortcutList[selectedShortcut.Position].Arguments;
+            pnlArgumentTextbox.Enabled = true;
+
+            pnlWorkingDirectory.Text = Category.ShortcutList[selectedShortcut.Position].WorkingDirectory;
+            pnlWorkingDirectory.Enabled = true;
+            cmdSelectDirectory.Enabled = true;
+
+            pnlColor.Visible = false;
+            pnlArguments.Visible = true;
+            UpdateLayout();
+        }
+
+        // Set the argument property to whatever the user set
+        private void pnlArgumentTextbox_TextChanged(object sender, EventArgs e)
+        {
+            Category.ShortcutList[selectedShortcut.Position].Arguments = pnlArgumentTextbox.Text;
+        }
+
+        // Clear textbox focus
+        private void pnlArgumentTextbox_KeyDown(object sender, System.Windows.Forms.KeyEventArgs e)
+        {
+            if (e.KeyCode == Keys.Enter)
+            {
+                lblAddGroupIcon.Focus();
+
+
+                e.Handled = true;
+                e.SuppressKeyPress = true;
+            }
+        }
+
+        // Manage the checkbox allowing opening all shortcuts
+        private void pnlAllowOpenAll_CheckedChanged(object sender, EventArgs e)
+        {
+            Category.allowOpenAll = pnlAllowOpenAll.Checked;
+        }
+
+        private void cmdSelectDirectory_Click(object sender, EventArgs e)
+        {
+            CommonOpenFileDialog openFileDialog = new CommonOpenFileDialog()
+            {
+                EnsurePathExists = true,
+                IsFolderPicker = true,
+                InitialDirectory = Category.ShortcutList[selectedShortcut.Position].WorkingDirectory
+            };
+
+            if (openFileDialog.ShowDialog() == CommonFileDialogResult.Ok)
+            {
+                this.Focus();
+                Category.ShortcutList[selectedShortcut.Position].WorkingDirectory = openFileDialog.FileName;
+            }
+        }
+
+        private void pnlWorkingDirectory_TextChanged(object sender, EventArgs e)
+        {
+            Category.ShortcutList[selectedShortcut.Position].WorkingDirectory = pnlWorkingDirectory.Text;
+
+            if (!shortcutChanged.Contains(Category.ShortcutList[selectedShortcut.Position]))
+            {
+                shortcutChanged.Add(Category.ShortcutList[selectedShortcut.Position]);
+            }
+        }
+
+        private String getProperDirectory(String file)
+        {
+            try {
+                if (Path.GetExtension(file).ToLower() == ".lnk")
+                {
+                    IWshShortcut extension = (IWshShortcut)new WshShell().CreateShortcut(file);
+
+                    return Path.GetDirectoryName(extension.TargetPath);
+                }
+                else
+                {
+                    return Path.GetDirectoryName(file);
+                }
+            } catch (Exception)
+            {
+                return MainPath.exeString;
+            }
+        }
+
+        private void frmGroup_MouseClick(object sender, MouseEventArgs e)
+        {
+            resetSelection();
+        }
+    }
+}
